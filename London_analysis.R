@@ -11,10 +11,13 @@ context <- data.table(read.csv("context-CLEANED.csv"))
 setkey(context, SITE_C)
 sample <- data.table(read.csv("sample-CLEANED.csv"))
 setkey(sample, SITE_S)
+Fish <- data.table(read.csv("Fish-CLEANED.csv"))
+setkey(period, Site_P)
 
 # Link tables together; drop un-needed fields
 context.period <- merge(period[,list(Site_P,Start,End,MID)], context[,list(SITE_C,Site_P)], "Site_P", all=FALSE)
 sample.period <- merge(context.period, sample[,list(SITE_S, SITE_C)], "SITE_C", all=FALSE)
+fish.period <- merge(period[,list(Site_P,Start,End,MID)], Fish[,list(SITE_C,Frag,Site_P)], "Site_P", all=FALSE)
 
 # Plot histogram of context mid-points
 # justifies concentration on last 2000 years
@@ -57,3 +60,13 @@ z[,id:=c(0.05,0.25,0.5,0.75,0.95)]
 z <- dcast.data.table(z, bin ~ id, value.var="V1")
 write.csv(z, "summary_sample_sim_by_period.csv", row.names=FALSE)
 
+# Calculate distribution of FISH across time
+# using simulation method (should take 3-5 minutes with default arguments)
+set.seed(1901)
+w <- date.simulate(fish.period[, list(Start,End)], weight=Fish.period[,Frag], rep=500)
+write.csv(w, "fish_simulated_by_period.csv", row.names=FALSE)
+boxplot(V1 ~ bin, data=w)
+v <- w[,quantile(V1, probs=c(0.05,0.25,0.5,0.75,0.95)), by=bin]
+v[,id:=c(0.05,0.25,0.5,0.75,0.95)]
+v <- dcast.data.table(z, bin ~ id, value.var="V1")
+write.csv(v, "summary_fish_sim_by_period.csv", row.names=FALSE)
