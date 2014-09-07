@@ -1,0 +1,505 @@
+# Load required packages
+library(data.table)
+library(reshape2)
+
+# Define function to calculate aoristic sum
+# Arguments: 'data' is a data table with two numeric columns called Start and End
+# 'start.date' is a single numeric value for the start of the time period to be analysed
+# 'end.date' is a single numric value for the end end of the time period to be analysed
+# 'bin.width' is a single numeric value setting the resolution of the analysis, in years
+# 'weight' is a numeric vector giving a weight for each context/entity
+# Returns: a two-column data table with the aoristic sum itself (numeric) and bin labels (character)
+# Also outputs: 'breaks', a numeric vector of breaks points,
+# 'params', a character value summarising the arguments, for use in naming output files
+
+aorist <- function(data, start.date=0, end.date=2000, bin.width=100, weight=1) { 
+  require(data.table)
+  aoristic.sum <- numeric(((end.date-start.date)/bin.width))
+  data <- cbind(data, weight)
+  data <- data[End >= start.date & Start <= end.date]
+  data[,a:=ceiling((Start-start.date)/bin.width)+1]
+  data[,b:=floor((End-start.date)/bin.width)]
+  data[,lead.in:=(ceiling((Start-start.date)/bin.width)-((Start-start.date)/bin.width))*bin.width]
+  data[,lead.out:=(((End-start.date)/bin.width)-floor((End-start.date)/bin.width))*bin.width]
+  data[,diff:=b-a]
+  data[,duration:={ifelse(diff==-2, lead.in+lead.out, End-Start)}]
+  data[,full.prob:=(bin.width/duration)*weight]
+  data[,in.prob:=(lead.in/duration)*weight]
+  data[,out.prob:=(lead.out/duration)*weight]
+  for(i in 1:nrow(data)) {
+    aoristic.sum[data[i,a]-1] <- aoristic.sum[data[i,a]-1] + data[i,in.prob]
+    aoristic.sum[data[i,b]+1] <- aoristic.sum[data[i,b]+1] + data[i,out.prob]
+    if(data[i,diff] >= 0) {
+      for(j in data[i,a]:data[i,b]) {
+        aoristic.sum[j] <- aoristic.sum[j] + data[i,full.prob]
+      }
+    }
+    if(i/1000 == round(i/1000)) {print(paste(i/nrow(data)*100, "percent complete"))}
+  }
+  breaks <<- seq(start.date, end.date, bin.width)
+  labels <- numeric(length(breaks)-1)
+  for(i in 1:length(labels)) {
+    labels[i] <- paste(breaks[i], breaks[i+1], sep="-")
+  }
+  params <<- paste("_", start.date, "-", end.date, "_by_", bin.width, sep="")
+  data.table(aoristic.sum[1:length(labels)], labels)
+}
+
+# Define function to simulate distribution of dates
+# Arguments: 'data' is a data table with at least two numeric columns called Start and End.
+# If 'data' also has a column called taxon, this can be used with the 'species' argument to
+# select the rows to be included in the simulation.
+# 'species' is a single character value indicating which rows should be included in analysis
+# It will be ignored if no taxon column is provided in 'data', and it defaults to NULL.
+# 'start.date' is a single numeric value for the start of the time period to be analysed
+# 'end.date' is a single numric value for the end end of the time period to be analysed
+# 'bin.width' is a single numeric value setting the resolution of the analysis, in years
+# 'rep' is the number of times the simulation will be run
+# 'weight' is a numeric vector giving a weight for each context/entity, defaulting to 1
+# Returns: a long-format data.table giving the sum of weight for each bin in each rep
+# Also outputs: 'breaks', a numeric vector of breaks points,
+# 'params', a character value summarising the arguments, for use in naming output files
+
+date.simulate <- function(data, species=NULL, start.date=0, end.date=2000, bin.width=100, rep=100, weight=1) {
+  require(data.table)
+  data <- cbind(data, weight)
+  if(length(species)>0 & "taxon" %in% colnames(data)) {data <- data[taxon==species,]}
+  data <- data[End >= start.date & Start <= end.date]
+  breaks <<- seq(start.date, end.date, bin.width)
+  params <<- paste("_", start.date, "-", end.date, "_by_", bin.width, "_x", rep, sep="")
+  labels <- numeric(length(breaks)-1)
+  for(i in 1:length(labels)) {
+    labels[i] <- paste(breaks[i], breaks[i+1], sep="-")
+  }
+  data <- cbind(rep(1:rep, each=nrow(data)), data)
+  data[,bin:={x<-runif(nrow(data)); (x*(data[,End]-data[,Start]))+data[,Start]}]
+  data[,bin:=cut(bin,breaks,labels=labels)]
+  data <- data[is.na(bin)==FALSE, sum(weight), by=list(V1,bin)]
+  setnames(data, old=1, new="rep.no")
+  data[order(rep.no, bin)]
+}
+
+# Define function to simulate a dummy set by sampling from within an aoristic sum output
+# Arguments: 'probs' is normally a data.table (the output of an aorist call) consisting of
+#   a numeric column ('aoristic.sum') to be used as relative probabilities, and a character
+#   column ('labels') containing bin labels.
+#   Alternatively, for a uniform dummy set, pass a uniform numeric vector whose length
+#   matches the desired number of bins - e.g. rep(1, 100), where 100 bins are required.
+# 'weight' is a numeric vector (or data frame/data.table) representing (weighted) instances
+# to be simulated. If given an additional character column called taxon, this can be used
+# to select rows for analysis using the 'species' argument.
+# 'species' is a single character value indicating rows to be included in analysis. Ignored
+# unless 'weight' has a taxon colum. Defaults to NULL.
+# 'start.date' and 'end.date' are single numeric values. Only required where a single vector
+#   is passed to 'probs' and the range under study is not 0-2000AD.
+
+dummy.simulate <- function(probs, weight, species=NULL, start.date=0, end.date=2000, rep=500) {
+  require(data.table)
+  probs <- data.table(probs)
+  if(ncol(probs)==1) {
+    bin.width <- (end.date-start.date)/nrow(probs)
+    breaks <- seq(start.date, end.date, bin.width)
+    labels <- numeric(nrow(probs))
+    for(i in 1:length(labels)) {
+      labels[i] <- paste(breaks[i], breaks[i+1], sep="-")
+    } 
+    probs[,labels:=labels]
+  }
+  setnames(probs, c(1,2), c("aoristic.sum", "labels"))
+  dummy <- data.table(weight)
+  if(length(species)>0 & "taxon" %in% colnames(weight)) {weight <- weight[taxon==species,]}
+  a.sum <- sum(probs$aoristic.sum)
+  a.breaks <- c(0, cumsum(probs$aoristic.sum))
+  dummy <- cbind(rep(1:rep, each=nrow(dummy)), dummy)
+  setnames(dummy, old=1, new="rep.no")
+  dummy[,bin:=runif(nrow(dummy), 0, a.sum)]
+  dummy[,bin:=cut(bin, a.breaks, labels=probs$labels)]
+  dummy <- dummy[is.na(bin)==FALSE, sum(weight), by=list(rep.no,bin)]
+  dummy[order(rep.no, bin)]
+}
+
+ 
+# Analysis Part 1. create calibration distribution using sample data and model all fish data
+
+# Read in inital cleaned data files
+period <- data.table(read.csv("period-CLEANED.csv"))
+setkey(period, Site_P)
+context <- data.table(read.csv("context-CLEANED.csv"))
+setkey(context, SITE_C)
+fish <- data.table(read.csv("Fish-CLEANED.csv"))
+setkey(fish, Site_P)
+
+sample2 <- data.table(read.csv("sample-Proc-VOL.csv"))
+setkey(sample2, SITE_S)
+
+
+# Link tables together; drop un-needed fields
+context.period <- merge(period[,list(Site_P,Start,End,MID)], context[,list(SITE_C,Site_P)], "Site_P", all=FALSE)
+fish.period <- merge(period[,list(Site_P,Start,End,MID)], fish[,list(Site_C,Frag,Site_P)], "Site_P", all=FALSE)
+sample.period2 <- merge(context.period, sample2[,list(SITE_S, Proc_VOL, SITE_C)], "SITE_C", all=FALSE)
+
+# Free up RAM
+rm(context, fish, context.period, sample2)
+
+# set resolution
+bin.width <- 50
+
+# create calibration distribution using sample data taking into account the volume of material processed
+xx <- aorist(sample.period2[, list(Start,End)], bin.width=bin.width, weight=sample.period2[,Proc_VOL])
+write.csv(xx, "aorist_samplesVOL_by_50.csv", row.names=FALSE)
+
+# Simulate from actual data all fish
+set.seed(1483)
+gm <- date.simulate(fish.period[,list(Start,End)], weight=fish.period[,Frag], bin.width=bin.width, rep=1000)
+write.csv(gm, paste("Fish_simulated_by_period", params, ".csv",sep=""), row.names=FALSE)
+boxplot(V1 ~ bin, data=gm, main="All Fish Simulated", xlab="Time (50yr intervals)", ylab="Frequency")
+gms <- gm[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms <- dcast.data.table(gms, bin ~ id, value.var="V1")
+write.csv(gms, paste("Fish-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+# simulate dummy set from calibration distribution all fishresults
+set.seed(593)
+gm.dummy <- dummy.simulate(probs=xx, weight=fish.period[,Frag], rep=1000)
+boxplot(V1 ~ bin, data=gm.dummy, main="All Fish Dummy", xlab="Time (50yr intervals)", ylab="Frequency")
+gms.dummy <- gm.dummy[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms.dummy[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms.dummy <- dcast.data.table(gms.dummy, bin ~ id, value.var="V1")
+write.csv(gms.dummy, paste("Fish-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+results <- merge(gm, gm.dummy, by=c("rep.no", "bin"), all=TRUE)
+results.all.fish <- results[is.na(V1.x)==TRUE, V1.x:=0]
+
+
+# Analysis Part 2. Model marine and fresh fish
+
+# Read in Marine fish cleaned data files
+MarineFish <- data.table(read.csv("MarineFish-CLEANED.csv"))
+setkey(MarineFish, Site_P)
+
+# Link tables together; drop un-needed fields
+marinefish.period <- merge(period[,list(Site_P,Start,End,MID)], MarineFish[,list(Site_C,Frag,Site_P)], "Site_P", all=FALSE)
+
+# Free up RAM
+rm(MarineFish)
+
+# Simulate from actual data marinefish
+set.seed(1483)
+gm <- date.simulate(marinefish.period[,list(Start,End)], weight=marinefish.period[,Frag], bin.width=bin.width, rep=1000)
+write.csv(gm, paste("MarineFish_simulated_by_period", params, ".csv",sep=""), row.names=FALSE)
+boxplot(V1 ~ bin, data=gm, main="All Marine Fish Simulated", xlab="Time (50yr intervals)", ylab="Frequency")
+gms <- gm[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms <- dcast.data.table(gms, bin ~ id, value.var="V1")
+write.csv(gms, paste("MarineFish-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+# simulate dummy set from calibration distribution marinefish results
+set.seed(593)
+gm.dummy <- dummy.simulate(probs=xx, weight=marinefish.period[,Frag], rep=1000)
+boxplot(V1 ~ bin, data=gm.dummy, main="All Marine Fish Dummy", xlab="Time (50yr intervals)", ylab="Frequency")
+gms.dummy <- gm.dummy[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms.dummy[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms.dummy <- dcast.data.table(gms.dummy, bin ~ id, value.var="V1")
+write.csv(gms.dummy, paste("MarineFish-CLEANED-dummy", params, ".csv",sep=""), row.names=FALSE)
+
+results <- merge(gm, gm.dummy, by=c("rep.no", "bin"), all=TRUE)
+results.marine.fish <- results[is.na(V1.x)==TRUE, V1.x:=0]
+
+
+# Read in fresh fish cleaned data files
+FreshFish <- data.table(read.csv("FreshFish-CLEANED.csv"))
+setkey(FreshFish, Site_P)
+
+# Link tables together; drop un-needed fields
+freshfish.period <- merge(period[,list(Site_P,Start,End,MID)], FreshFish[,list(Site_C,Frag,Site_P)], "Site_P", all=FALSE)
+
+# Free up RAM
+rm(FreshFish)
+
+# Simulate from actual data freshfish
+set.seed(1483)
+gm <- date.simulate(freshfish.period[,list(Start,End)], weight=freshfish.period[,Frag], bin.width=bin.width, rep=1000)
+write.csv(gm, paste("freshFish_simulated_by_period", params, ".csv",sep=""), row.names=FALSE)
+boxplot(V1 ~ bin, data=gm, main="All Freshwater Fish Simulated", xlab="Time (50yr intervals)", ylab="Frequency")
+gms <- gm[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms <- dcast.data.table(gms, bin ~ id, value.var="V1")
+write.csv(gms, paste("FreshFish-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+# simulate dummy set from calibration distribution freshfish results
+set.seed(593)
+gm.dummy <- dummy.simulate(probs=xx, weight=freshfish.period[,Frag], rep=1000)
+boxplot(V1 ~ bin, data=gm.dummy, main="All Freshwater Fish Dummy", xlab="Time (50yr intervals)", ylab="Frequency")
+gms.dummy <- gm.dummy[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms.dummy[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms.dummy <- dcast.data.table(gms.dummy, bin ~ id, value.var="V1")
+write.csv(gms.dummy, paste("FreshFish-CLEANED-dummy", params, ".csv",sep=""), row.names=FALSE)
+
+results <- merge(gm, gm.dummy, by=c("rep.no", "bin"), all=TRUE)
+results.fresh.fish <- results[is.na(V1.x)==TRUE, V1.x:=0]
+
+
+# Analysis Part 3. Model individual freshwater species
+
+# Read in Eel fish cleaned data files
+Eel <- data.table(read.csv("Eel-CLEANED.csv"))
+setkey(Eel, Site_P)
+
+# Link tables together; drop un-needed fields
+eel.period <- merge(period[,list(Site_P,Start,End,MID)], Eel[,list(Site_C,Frag,Site_P)], "Site_P", all=FALSE)
+
+# Free up RAM
+rm(Eel)
+
+# Simulate from actual data Eel
+set.seed(1483)
+gm <- date.simulate(eel.period[,list(Start,End)], weight=eel.period[,Frag], bin.width=bin.width, rep=1000)
+write.csv(gm, paste("eel_simulated_by_period", params, ".csv",sep=""), row.names=FALSE)
+boxplot(V1 ~ bin, data=gm, main="Eel Simulated", xlab="Time (50yr intervals)", ylab="Frequency")
+gms <- gm[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms <- dcast.data.table(gms, bin ~ id, value.var="V1")
+write.csv(gms, paste("Eel-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+# simulate dummy set from calibration distribution Eel results
+set.seed(593)
+gm.dummy <- dummy.simulate(probs=xx, weight=eel.period[,Frag], rep=1000)
+boxplot(V1 ~ bin, data=gm.dummy, main="Eel Dummy", xlab="Time (50yr intervals)", ylab="Frequency")
+gms.dummy <- gm.dummy[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms.dummy[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms.dummy <- dcast.data.table(gms.dummy, bin ~ id, value.var="V1")
+write.csv(gms.dummy, paste("Eel-CLEANED-dummy", params, ".csv",sep=""), row.names=FALSE)
+
+results <- merge(gm, gm.dummy, by=c("rep.no", "bin"), all=TRUE)
+results.eel <- results[is.na(V1.x)==TRUE, V1.x:=0]
+
+# Read in Carp fish cleaned data files
+Carp <- data.table(read.csv("Carp-CLEANED.csv"))
+setkey(Carp, Site_P)
+
+# Link tables together; drop un-needed fields
+carp.period <- merge(period[,list(Site_P,Start,End,MID)], Carp[,list(Site_C,Frag,Site_P)], "Site_P", all=FALSE)
+
+# Free up RAM
+rm(Carp)
+
+# Simulate from actual data Carp
+set.seed(1483)
+gm <- date.simulate(carp.period[,list(Start,End)], weight=carp.period[,Frag], bin.width=bin.width, rep=1000)
+write.csv(gm, paste("carp_simulated_by_period", params, ".csv",sep=""), row.names=FALSE)
+boxplot(V1 ~ bin, data=gm, main="Carp family Simulated", xlab="Time (50yr intervals)", ylab="Frequency")
+gms <- gm[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms <- dcast.data.table(gms, bin ~ id, value.var="V1")
+write.csv(gms, paste("Carp-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+# simulate dummy set from calibration distribution Carp results
+set.seed(593)
+gm.dummy <- dummy.simulate(probs=xx, weight=carp.period[,Frag], rep=1000)
+boxplot(V1 ~ bin, data=gm.dummy, main="Carp family Dummy", xlab="Time (50yr intervals)", ylab="Frequency")
+gms.dummy <- gm.dummy[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms.dummy[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms.dummy <- dcast.data.table(gms.dummy, bin ~ id, value.var="V1")
+write.csv(gms.dummy, paste("Carp-CLEANED-dummy", params, ".csv",sep=""), row.names=FALSE)
+
+results <- merge(gm, gm.dummy, by=c("rep.no", "bin"), all=TRUE)
+results.carp <- results[is.na(V1.x)==TRUE, V1.x:=0]
+
+# Analysis Part 3. Model individual marine species
+
+# Read in Herring fish cleaned data files. Contains Herring and Herring family
+Herring <- data.table(read.csv("Herring-CLEANED.csv"))
+setkey(Herring, Site_P)
+
+# Link tables together; drop un-needed fields
+herring.period <- merge(period[,list(Site_P,Start,End,MID)], Herring[,list(Site_C,Frag,Site_P)], "Site_P", all=FALSE)
+
+# Free up RAM
+rm(Herring)
+
+# Simulate from actual data Herring
+set.seed(1483)
+gm <- date.simulate(herring.period[,list(Start,End)], weight=herring.period[,Frag], bin.width=bin.width, rep=1000)
+write.csv(gm, paste("herring_simulated_by_period", params, ".csv",sep=""), row.names=FALSE)
+boxplot(V1 ~ bin, data=gm, main="Herring family Simulated", xlab="Time (50yr intervals)", ylab="Frequency")
+gms <- gm[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms <- dcast.data.table(gms, bin ~ id, value.var="V1")
+write.csv(gms, paste("Herring-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+# simulate dummy set from calibration distribution Herring results
+set.seed(593)
+gm.dummy <- dummy.simulate(probs=xx, weight=herring.period[,Frag], rep=1000)
+boxplot(V1 ~ bin, data=gm.dummy, main="Herring family Dummy", xlab="Time (50yr intervals)", ylab="Frequency")
+gms.dummy <- gm.dummy[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms.dummy[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms.dummy <- dcast.data.table(gms.dummy, bin ~ id, value.var="V1")
+write.csv(gms.dummy, paste("Herring-CLEANED-dummy", params, ".csv",sep=""), row.names=FALSE)
+
+results <- merge(gm, gm.dummy, by=c("rep.no", "bin"), all=TRUE)
+results.herring <- results[is.na(V1.x)==TRUE, V1.x:=0]
+
+
+# Read in Gadid fish cleaned data files. Contains Cod and Gadid family
+Gadid <- data.table(read.csv("Gadid-CLEANED.csv"))
+setkey(Gadid, Site_P)
+
+# Link tables together; drop un-needed fields
+gadid.period <- merge(period[,list(Site_P,Start,End,MID)], Gadid[,list(Site_C,Frag,Site_P)], "Site_P", all=FALSE)
+
+# Free up RAM
+rm(Gadid)
+
+# Simulate from actual data Gadid 
+set.seed(1483)
+gm <- date.simulate(gadid.period[,list(Start,End)], weight=gadid.period[,Frag], bin.width=bin.width, rep=1000)
+write.csv(gm, paste("gadid_simulated_by_period", params, ".csv",sep=""), row.names=FALSE)
+boxplot(V1 ~ bin, data=gm, main="Gadid family Simulated", xlab="Time (50yr intervals)", ylab="Frequency")
+gms <- gm[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms <- dcast.data.table(gms, bin ~ id, value.var="V1")
+write.csv(gms, paste("Gadid-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+# simulate dummy set from calibration distribution Gadid results
+set.seed(593)
+gm.dummy <- dummy.simulate(probs=xx, weight=gadid.period[,Frag], rep=1000)
+boxplot(V1 ~ bin, data=gm.dummy, main="Gadid family Dummy", xlab="Time (50yr intervals)", ylab="Frequency")
+gms.dummy <- gm.dummy[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms.dummy[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms.dummy <- dcast.data.table(gms.dummy, bin ~ id, value.var="V1")
+write.csv(gms.dummy, paste("Gadid-CLEANED-dummy", params, ".csv",sep=""), row.names=FALSE)
+
+results <- merge(gm, gm.dummy, by=c("rep.no", "bin"), all=TRUE)
+results.gadid <- results[is.na(V1.x)==TRUE, V1.x:=0]
+
+
+# Read in Plaice.Flounder fish cleaned data files. Contains Plaice, Flounder & Plaice/Flounder results
+Plaice.Flounder <- data.table(read.csv("Plaice.Flounder-CLEANED.csv"))
+setkey(Plaice.Flounder, Site_P)
+
+# Link tables together; drop un-needed fields
+plaice.flounder.period <- merge(period[,list(Site_P,Start,End,MID)], Plaice.Flounder[,list(Site_C,Frag,Site_P)], "Site_P", all=FALSE)
+
+# Free up RAM
+rm(Plaice.Flounder)
+
+# Simulate from actual data Plaice.Flounder
+set.seed(1483)
+gm <- date.simulate(plaice.flounder.period[,list(Start,End)], weight=plaice.flounder.period[,Frag], bin.width=bin.width, rep=1000)
+write.csv(gm, paste("plaice.flounder_simulated_by_period", params, ".csv",sep=""), row.names=FALSE)
+boxplot(V1 ~ bin, data=gm, main="Plaice/Flounder Simulated", xlab="Time (50yr intervals)", ylab="Frequency")
+gms <- gm[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms <- dcast.data.table(gms, bin ~ id, value.var="V1")
+write.csv(gms, paste("Plaice.Flounder-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+# simulate dummy set from calibration distribution Plaice.Flounder results
+set.seed(593)
+gm.dummy <- dummy.simulate(probs=xx, weight=plaice.flounder.period[,Frag], rep=1000)
+boxplot(V1 ~ bin, data=gm.dummy, main="Plaice/Flounder Dummy", xlab="Time (50yr intervals)", ylab="Frequency")
+gms.dummy <- gm.dummy[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms.dummy[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms.dummy <- dcast.data.table(gms.dummy, bin ~ id, value.var="V1")
+write.csv(gms.dummy, paste("Plaice.Flounder-CLEANED-dummy", params, ".csv",sep=""), row.names=FALSE)
+
+results <- merge(gm, gm.dummy, by=c("rep.no", "bin"), all=TRUE)
+results.plaice.flounder <- results[is.na(V1.x)==TRUE, V1.x:=0]
+
+
+# Read in Smelt fish cleaned data files.
+Smelt <- data.table(read.csv("Smelt-CLEANED.csv"))
+setkey(Smelt, Site_P)
+
+# Link tables together; drop un-needed fields
+smelt.period <- merge(period[,list(Site_P,Start,End,MID)], Smelt[,list(Site_C,Frag,Site_P)], "Site_P", all=FALSE)
+
+# Free up RAM
+rm(Smelt)
+
+# Simulate from actual data Smelt
+set.seed(1483)
+gm <- date.simulate(smelt.period[,list(Start,End)], weight=smelt.period[,Frag], bin.width=bin.width, rep=1000)
+write.csv(gm, paste("smelt_simulated_by_period", params, ".csv",sep=""), row.names=FALSE)
+boxplot(V1 ~ bin, data=gm, main="Smelt Simulated", xlab="Time (50yr intervals)", ylab="Frequency")
+gms <- gm[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms <- dcast.data.table(gms, bin ~ id, value.var="V1")
+write.csv(gms, paste("Smelt-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+# simulate dummy set from calibration distribution smelt results
+set.seed(593)
+gm.dummy <- dummy.simulate(probs=xx, weight=smelt.period[,Frag], rep=1000)
+boxplot(V1 ~ bin, data=gm.dummy, main="Smelt Dummy", xlab="Time (50yr intervals)", ylab="Frequency")
+gms.dummy <- gm.dummy[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms.dummy[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms.dummy <- dcast.data.table(gms.dummy, bin ~ id, value.var="V1")
+write.csv(gms.dummy, paste("Smelt-CLEANED-dummy", params, ".csv",sep=""), row.names=FALSE)
+
+results <- merge(gm, gm.dummy, by=c("rep.no", "bin"), all=TRUE)
+results.smelt <- results[is.na(V1.x)==TRUE, V1.x:=0]
+
+
+
+# Read in Gurnard fish cleaned data files.
+Gurnard <- data.table(read.csv("Gurnard-CLEANED.csv"))
+setkey(Gurnard, Site_P)
+
+# Link tables together; drop un-needed fields
+gurnard.period <- merge(period[,list(Site_P,Start,End,MID)], Gurnard[,list(Site_C,Frag,Site_P)], "Site_P", all=FALSE)
+
+# Free up RAM
+rm(Gurnard)
+
+# Simulate from actual data Gurnard
+set.seed(1483)
+gm <- date.simulate(gurnard.period[,list(Start,End)], weight=gurnard.period[,Frag], bin.width=bin.width, rep=1000)
+write.csv(gm, paste("gurnard_simulated_by_period", params, ".csv",sep=""), row.names=FALSE)
+boxplot(V1 ~ bin, data=gm, main="Gurnard Simulated", xlab="Time (50yr intervals)", ylab="Frequency")
+gms <- gm[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms <- dcast.data.table(gms, bin ~ id, value.var="V1")
+write.csv(gms, paste("Gurnard-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+# simulate dummy set from calibration distribution Gurnard results
+set.seed(593)
+gm.dummy <- dummy.simulate(probs=xx, weight=gurnard.period[,Frag], rep=1000)
+boxplot(V1 ~ bin, data=gm.dummy, main="Gurnard Dummy", xlab="Time (50yr intervals)", ylab="Frequency")
+gms.dummy <- gm.dummy[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms.dummy[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms.dummy <- dcast.data.table(gms.dummy, bin ~ id, value.var="V1")
+write.csv(gms.dummy, paste("Gurnard-CLEANED-dummy", params, ".csv",sep=""), row.names=FALSE)
+
+results <- merge(gm, gm.dummy, by=c("rep.no", "bin"), all=TRUE)
+results.gurnard <- results[is.na(V1.x)==TRUE, V1.x:=0]
+
+# Read in Mackerel fish cleaned data files.
+Mackerel <- data.table(read.csv("Mackerel-CLEANED.csv"))
+setkey(Mackerel, Site_P)
+
+# Link tables together; drop un-needed fields
+mackerel.period <- merge(period[,list(Site_P,Start,End,MID)], Mackerel[,list(Site_C,Frag,Site_P)], "Site_P", all=FALSE)
+
+# Free up RAM
+rm(Mackerel)
+
+# Simulate from actual data Mackerel
+set.seed(1483)
+gm <- date.simulate(mackerel.period[,list(Start,End)], weight=mackerel.period[,Frag], bin.width=bin.width, rep=1000)
+write.csv(gm, paste("mackerel_simulated_by_period", params, ".csv",sep=""), row.names=FALSE)
+boxplot(V1 ~ bin, data=gm, main="Mackerel Simulated", xlab="Time (50yr intervals)", ylab="Frequency")
+gms <- gm[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms <- dcast.data.table(gms, bin ~ id, value.var="V1")
+write.csv(gms, paste("Mackerel-CLEANED", params, ".csv",sep=""), row.names=FALSE)
+
+# simulate dummy set from calibration distribution Mackerel results
+set.seed(593)
+gm.dummy <- dummy.simulate(probs=xx, weight=mackerel.period[,Frag], rep=1000)
+boxplot(V1 ~ bin, data=gm.dummy, main="Mackerel Dummy", xlab="Time (50yr intervals)", ylab="Frequency")
+gms.dummy <- gm.dummy[,quantile(V1, probs=c(0.025,0.25,0.5,0.75,0.975)), by=bin]
+gms.dummy[,id:=c(0.025,0.25,0.5,0.75,0.975)]
+gms.dummy <- dcast.data.table(gms.dummy, bin ~ id, value.var="V1")
+write.csv(gms.dummy, paste("Mackerel-CLEANED-dummy", params, ".csv",sep=""), row.names=FALSE)
+
+results <- merge(gm, gm.dummy, by=c("rep.no", "bin"), all=TRUE)
+results.mackerel <- results[is.na(V1.x)==TRUE, V1.x:=0]
