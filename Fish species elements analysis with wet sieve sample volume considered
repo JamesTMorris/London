@@ -1,3 +1,5 @@
+# NOTE. Need to work out how to also include the species name in each of the graphs and the CSV outputs
+
 # Load required packages
 library(data.table)
 library(reshape2)
