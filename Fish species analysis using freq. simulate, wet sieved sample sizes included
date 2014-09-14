@@ -199,13 +199,13 @@ setkey(context, SITE_C)
 fish <- data.table(read.csv("Fish-CLEANED.csv"))
 setkey(fish, Site_P)
 
-sample2 <- data.table(read.csv("sample-Proc-VOL.csv"))
-setkey(sample2, SITE_S)
+sample2 <- data.table(read.csv("Sample volume-CLEANED.csv"))
+setkey(sample2, SITE_C)
 
 # Link tables together; drop un-needed fields
 context.period <- merge(period[,list(Site_P,Start,End,MID)], context[,list(SITE_C,Site_P)], "Site_P", all=FALSE)
 fish.period <- merge(period[,list(Site_P,Start,End,MID)], fish[,list(Site_C,Species,Frag,Site_P)], "Site_P", all=FALSE)
-sample.period2 <- merge(context.period, sample2[,list(SITE_S, Proc_VOL, SITE_C)], "SITE_C", all=FALSE)
+sample.period2 <- merge(context.period, sample2[,list(WTS_VOL, SITE_C)], "SITE_C", all=FALSE)
 
 # Free up RAM
 rm(context, fish, context.period, sample2)
@@ -214,7 +214,7 @@ rm(context, fish, context.period, sample2)
 bin.width <- 50
 
 # create calibration distribution using sample data taking into account the volunme of material processed
-xx <- aorist(sample.period2[, list(Start,End)], bin.width=bin.width, weight=sample.period2[,Proc_VOL])
+xx <- aorist(sample.period2[, list(Start,End)], bin.width=bin.width, weight=sample.period2[,WTS_VOL])
 write.csv(xx, "aorist_samplesVOL_by_50.csv", row.names=FALSE)
 
 # Fresh water species
